@@ -20,8 +20,9 @@ local maxSteer = 30
 local rearWheelSteeringEnabled = true
 local carState = {
 	autopilotEnabled = false,
-	obstacleDetected = false,
 	showRays = false,
+	obstacleDetected = false,
+	blinker = nil,
 }
 
 local Kp = 0.5  -- Proportional gain
@@ -82,12 +83,49 @@ local function changeBrakeLights(braking)
 	end
 end
 
+local function blink()
+	while carState.blinker == "left" do
+		car["FL Turn Signal"].Transparency = 0
+		car["BL Turn Signal"].Transparency = 0
+		SoundManager.playSound(6107429348, 1, nil, car.DriverSeat.Sound)
+		wait(1)
+		car["FL Turn Signal"].Transparency = 1
+		car["BL Turn Signal"].Transparency = 1
+		SoundManager.playSound(6107429348, 1, nil, car.DriverSeat.Sound)
+		wait(1)
+	end
+	while carState.blinker == "right" do
+		car["FR Turn Signal"].Transparency = 0
+		car["BR Turn Signal"].Transparency = 0
+		SoundManager.playSound(6107429348, 1, nil, car.DriverSeat.Sound)
+		wait(1)
+		car["FR Turn Signal"].Transparency = 1
+		car["BR Turn Signal"].Transparency = 1
+		SoundManager.playSound(6107429348, 1, nil, car.DriverSeat.Sound)
+		wait(1)
+	end
+end
+
+local function changeBlinker(blinker)
+	if carState.blinker == blinker then
+		carState.blinker = nil
+	else
+		carState.blinker = blinker
+	end
+
+	if carState.blinker == "left" or carState.blinker == "right" then
+		spawn(function()
+			blink()
+		end)
+	end
+end
+
 local function detectObstacle()
 	local rays = {}
 	local origin = car.Detector.Position
-	local distance = 50
-	local angleIncrement = 0.5
-	local angleRange = 30
+	local distance = 30
+	local width = 10
+	local numRays = 100
 
 	for _, child in ipairs(car:GetChildren()) do
 		if child.Name == "RayVisualizer" then
@@ -95,35 +133,45 @@ local function detectObstacle()
 		end
 	end
 
-	for i = -angleRange / 2, angleRange / 2, angleIncrement do
-		local direction = (car.Detector.CFrame * CFrame.Angles(0, math.rad(i), 0)).RightVector * distance
+	local halfWidth = width / 2
+	local spacing = width / (numRays - 1)
+
+	for i = 0, numRays - 1 do
+		local lateralOffset = -halfWidth + (i * spacing)
+		local offsetPosition = car.Detector.CFrame.Position + (car.Detector.CFrame.RightVector * lateralOffset) + (car.Detector.CFrame.UpVector * 0)
+		local direction = car.Detector.CFrame.LookVector * distance
 
 		local raycastParams = RaycastParams.new()
 		raycastParams.FilterDescendantsInstances = {car, workspace.Roads}
 		raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
-		local result = workspace:Raycast(origin, direction, raycastParams)
+		local result = workspace:Raycast(offsetPosition, direction, raycastParams)
 
-		local hitPosition = result and result.Position or (origin + direction)
-		
 		if carState.showRays then
+			local hitPosition = result and result.Position or (offsetPosition + direction)
 			local color = result and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(21, 140, 232)
-			drawRay(origin, result and result.Position or (origin + direction), color, car)
+			drawRay(offsetPosition, hitPosition, color, car)
 		end
-		
+
 		if result then
 			local hitInstance = result.Instance
-			local hitDistance = (result.Position - origin).Magnitude
-			table.insert(rays, {instance = hitInstance, distance = hitDistance, angle = i})
+			local hitDistance = (result.Position - offsetPosition).Magnitude
+			table.insert(rays, {instance = hitInstance, distance = hitDistance, offset = i})
+			if hitInstance.Parent.Name == "Car" and hitInstance.Parent:FindFirstChild("DriverSeat") and hitInstance.Parent.DriverSeat.Throttle == 0 and not hitInstance.Parent.DriverSeat.Occupant then
+				print("Car not moving and has no one in it")
+			end
 		end
 	end
 
 	if #rays > 0 then
-		local sum = 0
+		local offsetSum = 0
+		local distanceSum = 0
 		for _, ray in ipairs(rays) do
-			sum = sum + ray.angle
+			offsetSum = offsetSum + ray.offset
+			distanceSum = distanceSum + ray.distance
 		end
-		local averageHitAngle = sum / #rays
-		return -averageHitAngle
+		local averageOffset = math.round(offsetSum / #rays)
+		local averageDistance = math.round(distanceSum / #rays)
+		return averageOffset, averageDistance
 	end
 
 	return nil
@@ -151,21 +199,51 @@ function steerVehicle(angle)
 	end
 end
 
+function turnVehicle(direction)
+	wait(1)
+	if direction == "left" then
+		if not carState.blinker then
+			changeBlinker("left")
+		end
+		accelerateVehicle(0.5)
+		wait(0.5)
+		steerVehicle(-0.5)
+		wait(2.5)
+		changeBlinker(nil)
+	elseif direction == "right" then
+		if not carState.blinker then
+			changeBlinker("right")
+		end
+		accelerateVehicle(0.25)
+		steerVehicle(-0.5)
+		wait(1)
+		steerVehicle(1)
+		wait(3.5)
+		changeBlinker(nil)
+	elseif direction == "straight" then
+		accelerateVehicle(0.5)
+		wait(2)
+		changeBlinker(nil)
+	end
+end
+
 local function updateMotors()
 	if carState.autopilotEnabled then
-		local averageHitAngle = detectObstacle()
+		local averageObjectOffset, averageObjectDistance = detectObstacle()
 		local objectAccelerationAdjustment = 1
 		local objectSteerAdjustment = 0
-
-		if averageHitAngle and averageHitAngle < -5 then
-			objectSteerAdjustment = 0.5
-			objectAccelerationAdjustment = 1
-		elseif averageHitAngle and averageHitAngle > 5 then
-			objectSteerAdjustment = -0.5
-			objectAccelerationAdjustment = 1
-		elseif averageHitAngle and averageHitAngle >= -5 and averageHitAngle <= 5 then
-			accelerateVehicle(0)
-			return
+		
+		if averageObjectOffset and averageObjectDistance then
+			if averageObjectOffset < 35 then
+				objectSteerAdjustment = 0.5
+				objectAccelerationAdjustment = 0.5
+			elseif averageObjectOffset > 65 then
+				objectSteerAdjustment = -0.5
+				objectAccelerationAdjustment = 0.5
+			else
+				accelerateVehicle(0)
+				return
+			end
 		end
 
 		local roadWidth = 36
@@ -180,60 +258,120 @@ local function updateMotors()
 			drawRay(downRayOrigin, downRay and downRay.Position or (downRayOrigin + downRayDirection), Color3.fromRGB(21, 140, 232), car)
 		end
 
-		local stopSignRayOrigin = car.Detector.CFrame * Vector3.new(15, 0, 0)
+		local stopSignRayOrigin = car.Detector.CFrame * Vector3.new(0, 0, -15)
 		local stopSignRayDirection = Vector3.new(0, -50, 0)
 		local stopSignRay = workspace:Raycast(stopSignRayOrigin, stopSignRayDirection, raycastParams)
 		if carState.showRays then
-			drawRay(stopSignRayOrigin, stopSignRay and stopSignRay.Position or (stopSignRayOrigin + stopSignRayDirection), Color3.fromRGB(21, 140, 232), car)
+			drawRay(stopSignRayOrigin, stopSignRay and stopSignRay.Position or (stopSignRayOrigin + stopSignRayDirection), Color3.fromRGB(255, 0, 0), car)
 		end
 		
-		local straightDetectionRayOrigin = car.Detector.CFrame * Vector3.new(75, 0, 0)
+		local straightDetectionRayOrigin = car.Detector.CFrame * Vector3.new(0, 0, -75)
 		local straightDetectionRayDirection = Vector3.new(0, -50, 0)
 		local straightDetectionRay = workspace:Raycast(straightDetectionRayOrigin, straightDetectionRayDirection, raycastParams)
 		if carState.showRays then
-			drawRay(straightDetectionRayOrigin, straightDetectionRay and straightDetectionRay.Position or (straightDetectionRayOrigin + straightDetectionRayDirection), Color3.fromRGB(21, 140, 232), car)
+			drawRay(straightDetectionRayOrigin, straightDetectionRay and straightDetectionRay.Position or (straightDetectionRayOrigin + straightDetectionRayDirection), Color3.fromRGB(0, 255, 0), car)
 		end
-		local leftDetectionRayOrigin = car.Detector.CFrame * Vector3.new(37.5, 0, -37.5)
+		local leftDetectionRayOrigin = car.Detector.CFrame * Vector3.new(-37.5, 0, -37.5)
 		local leftDetectionRayDirection = Vector3.new(0, -50, 0)
 		local leftDetectionRay = workspace:Raycast(leftDetectionRayOrigin, leftDetectionRayDirection, raycastParams)
 		if carState.showRays then
-			drawRay(leftDetectionRayOrigin, leftDetectionRay and leftDetectionRay.Position or (leftDetectionRayOrigin + leftDetectionRayDirection), Color3.fromRGB(21, 140, 232), car)
+			drawRay(leftDetectionRayOrigin, leftDetectionRay and leftDetectionRay.Position or (leftDetectionRayOrigin + leftDetectionRayDirection), Color3.fromRGB(255, 0, 0), car)
 		end
-		local rightDetectionRayOrigin = car.Detector.CFrame * Vector3.new(37.5, 0, 37.5)
+		local rightDetectionRayOrigin = car.Detector.CFrame * Vector3.new(37.5, 0, -37.5)
 		local rightDetectionRayDirection = Vector3.new(0, -50, 0)
 		local rightDetectionRay = workspace:Raycast(rightDetectionRayOrigin, rightDetectionRayDirection, raycastParams)
 		if carState.showRays then
-			drawRay(rightDetectionRayOrigin, rightDetectionRay and rightDetectionRay.Position or (rightDetectionRayOrigin + rightDetectionRayDirection), Color3.fromRGB(255, 0, 0), car)
+			drawRay(rightDetectionRayOrigin, rightDetectionRay and rightDetectionRay.Position or (rightDetectionRayOrigin + rightDetectionRayDirection), Color3.fromRGB(0, 0, 255), car)
 		end
 
 		if downRay then
 			if stopSignRay and stopSignRay.Instance.Parent.Name == "Intersection Road" then
-				if straightDetectionRay and straightDetectionRay.Instance.Parent.Name == "Straight Road" then
-					print("Straight Detected")
-				end
-				if leftDetectionRay and leftDetectionRay.Instance.Parent.Name == "Straight Road" then
-					print("Left Detected")
-				end
-				if rightDetectionRay and rightDetectionRay.Instance.Parent.Name == "Straight Road" then
-					print("Right Detected")
-				end
+				local straightAvailable = straightDetectionRay and straightDetectionRay.Instance.Parent.Name == "Straight Road"
+				local leftAvailable = leftDetectionRay and leftDetectionRay.Instance.Parent.Name == "Straight Road"
+				local rightAvailable = rightDetectionRay and rightDetectionRay.Instance.Parent.Name == "Straight Road"
 				accelerateVehicle(0)
 				steerVehicle(0)
-				wait(1)
-				accelerateVehicle(0.5)
-				wait(0.5)
-				steerVehicle(-0.5)
-				wait(2.5)
+				if straightAvailable and not leftAvailable and not rightAvailable then
+					turnVehicle("straight")
+				elseif not straightAvailable and leftAvailable and not rightAvailable then
+					turnVehicle("left")
+				elseif not straightAvailable and not leftAvailable and rightAvailable then
+					turnVehicle("right")
+				elseif straightAvailable and leftAvailable and not rightAvailable then
+					if car.DriverSeat.Occupant then
+						if carState.blinker == "left" then
+							turnVehicle("left")
+						else
+							turnVehicle("straight")
+						end
+					else
+						local direction = math.random(1, 2)
+						if direction == 1 then
+							turnVehicle("left")
+						elseif direction == 2 then
+							turnVehicle("straight")
+						end
+					end
+				elseif straightAvailable and not leftAvailable and rightAvailable then
+					if car.DriverSeat.Occupant then
+						if carState.blinker == "right" then
+							turnVehicle("right")
+						else
+							turnVehicle("straight")
+						end
+					else
+						local direction = math.random(1, 2)
+						if direction == 1 then
+							turnVehicle("right")
+						elseif direction == 2 then
+							turnVehicle("straight")
+						end
+					end
+				elseif not straightAvailable and leftAvailable and rightAvailable then
+					if car.DriverSeat.Occupant then
+						if carState.blinker == "left" then
+							turnVehicle("left")
+						elseif carState.blinker == "right" then
+							turnVehicle("right")
+						end
+					else
+						local direction = math.random(1, 2)
+						if direction == 1 then
+							turnVehicle("left")
+						elseif direction == 2 then
+							turnVehicle("right")
+						end
+					end
+				elseif straightAvailable and leftAvailable and rightAvailable then
+					if car.DriverSeat.Occupant then
+						if carState.blinker == "left" then
+							turnVehicle("left")
+						elseif carState.blinker == "right" then
+							turnVehicle("right")
+						else
+							turnVehicle("straight")
+						end
+					else
+						local direction = math.random(1, 3)
+						if direction == 1 then
+							turnVehicle("left")
+						elseif direction == 2 then
+							turnVehicle("right")
+						elseif direction == 3 then
+							turnVehicle("straight")
+						end
+					end
+				end
 			else
 				local leftRayOrigin = Vector3.new(car.Detector.Position.X, downRay.Position.Y + 0.25, car.Detector.Position.Z)
-				local leftRayDirection = car.Detector.CFrame.LookVector * roadWidth
+				local leftRayDirection = -car.Detector.CFrame.RightVector * roadWidth
 				local leftRay = workspace:Raycast(leftRayOrigin, leftRayDirection, raycastParams)
 				if carState.showRays then
 					drawRay(leftRayOrigin, leftRay and leftRay.Position or (leftRayOrigin + leftRayDirection), Color3.fromRGB(21, 140, 232), car)
 				end
 
 				local rightRayOrigin = Vector3.new(car.Detector.Position.X, downRay.Position.Y + 0.25, car.Detector.Position.Z)
-				local rightRayDirection = -car.Detector.CFrame.LookVector * roadWidth
+				local rightRayDirection = car.Detector.CFrame.RightVector * roadWidth
 				local rightRay = workspace:Raycast(rightRayOrigin, rightRayDirection, raycastParams)
 				if carState.showRays then
 					drawRay(rightRayOrigin, rightRay and rightRay.Position or (rightRayOrigin + rightRayDirection), Color3.fromRGB(255, 0, 0), car)
@@ -284,30 +422,43 @@ event.OnServerEvent:Connect(function(player, vehicle, key)
 	if vehicle and vehicle:IsA("Model") then
 		local seat = vehicle:FindFirstChildOfClass("VehicleSeat")
 		if seat and seat.Occupant and seat.Occupant.Parent == player.Character then
-			if key == "E" then
+			if key == "F" then
 				carState.autopilotEnabled = not carState.autopilotEnabled
 				if carState.autopilotEnabled then
-					SoundManager.playSound(4611349448, nil, player)
+					SoundManager.playSound(4611349448, 1, nil, car.DriverSeat.Sound)
 					changeLEDStrips(Color3.fromRGB(21, 140, 232))
 				else
-					SoundManager.playSound(4611348524, nil, player)
+					SoundManager.playSound(4611348524, 1, nil, car.DriverSeat.Sound)
 					changeLEDStrips(Color3.fromRGB(255, 0, 0))
 				end
+				for _, child in ipairs(car:GetChildren()) do
+					if child.Name == "RayVisualizer" then
+						child:Destroy()
+					end
+				end
 				updateMotors()
-			elseif key == "Q" then
+			elseif key == "R" then
 				carState.showRays = not carState.showRays
 				for _, child in ipairs(car:GetChildren()) do
 					if child.Name == "RayVisualizer" then
 						child:Destroy()
 					end
 				end
+			elseif key == "Q" then
+				changeBlinker("left")
+			elseif key == "E" then
+				changeBlinker("right")
 			end
 		end
 	end
 end)
 
 weldMeshesToChassis(car.Meshes)
-changeLEDStrips(Color3.new(1, 0, 0.0156863))
+changeLEDStrips(Color3.fromRGB(255, 0, 0))
+if carState.autopilotEnabled then
+	SoundManager.playSound(4611349448, 1, nil, car.DriverSeat.Sound)
+	changeLEDStrips(Color3.fromRGB(21, 140, 232))
+end
 while true do
 	if carState.autopilotEnabled then
 		updateMotors()
