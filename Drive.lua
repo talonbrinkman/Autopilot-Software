@@ -1,6 +1,7 @@
 local SoundManager = require(game:GetService("ReplicatedStorage")["Sound Manager"])
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local event = ReplicatedStorage:FindFirstChild("VehicleKeyPress")
+local CollectionService = game:GetService("CollectionService")
 
 local car = script.Parent.Parent
 local driveSeat = script.Parent
@@ -25,8 +26,8 @@ local carState = {
 	blinker = nil,
 }
 
-local Kp = 0.5  -- Proportional gain
-local Ki = 0.01 -- Integral gain
+local Kp = 2  -- Proportional gain
+local Ki = 0.1 -- Integral gain
 local Kd = 0.2  -- Derivative gain
 local previousError = 0
 local integral = 0
@@ -53,8 +54,9 @@ local function drawRay(origin: Vector3, hitPosition: Vector3, color: Color3, par
 	rayPart.CanCollide = false
 	rayPart.Color = color
 	rayPart.CFrame = CFrame.new(origin, hitPosition) * CFrame.new(0, 0, -rayPart.Size.Z / 2)
-	rayPart.Name = "RayVisualizer"
+	rayPart.Name = "Ray"
 	rayPart.Parent = parent
+	CollectionService:AddTag(rayPart, "Ray")
 end
 
 local function changeLEDStrips(color)
@@ -88,21 +90,19 @@ local function blink()
 		car["FL Turn Signal"].Transparency = 0
 		car["BL Turn Signal"].Transparency = 0
 		SoundManager.playSound(6107429348, 1, nil, car.DriverSeat.Sound)
-		wait(1)
+		wait(0.5)
 		car["FL Turn Signal"].Transparency = 1
 		car["BL Turn Signal"].Transparency = 1
-		SoundManager.playSound(6107429348, 1, nil, car.DriverSeat.Sound)
-		wait(1)
+		wait(0.5)
 	end
 	while carState.blinker == "right" do
 		car["FR Turn Signal"].Transparency = 0
 		car["BR Turn Signal"].Transparency = 0
 		SoundManager.playSound(6107429348, 1, nil, car.DriverSeat.Sound)
-		wait(1)
+		wait(0.5)
 		car["FR Turn Signal"].Transparency = 1
 		car["BR Turn Signal"].Transparency = 1
-		SoundManager.playSound(6107429348, 1, nil, car.DriverSeat.Sound)
-		wait(1)
+		wait(0.5)
 	end
 end
 
@@ -123,12 +123,12 @@ end
 local function detectObstacle()
 	local rays = {}
 	local origin = car.Detector.Position
-	local distance = 30
+	local distance = 40
 	local width = 10
 	local numRays = 100
 
 	for _, child in ipairs(car:GetChildren()) do
-		if child.Name == "RayVisualizer" then
+		if child.Name == "Ray" then
 			child:Destroy()
 		end
 	end
@@ -138,12 +138,25 @@ local function detectObstacle()
 
 	for i = 0, numRays - 1 do
 		local lateralOffset = -halfWidth + (i * spacing)
-		local offsetPosition = car.Detector.CFrame.Position + (car.Detector.CFrame.RightVector * lateralOffset) + (car.Detector.CFrame.UpVector * 0)
+		local offsetPosition = car.Detector.CFrame.Position + (car.Detector.CFrame.RightVector * lateralOffset) + (car.Detector.CFrame.LookVector * -10)
 		local direction = car.Detector.CFrame.LookVector * distance
 
 		local raycastParams = RaycastParams.new()
-		raycastParams.FilterDescendantsInstances = {car, workspace.Roads}
-		raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+		local carOccupants = {}
+		for _, descendant in ipairs(car:GetDescendants()) do
+			if descendant:IsA("VehicleSeat") or descendant:IsA("Seat") then
+				local occupant = descendant.Occupant
+				if occupant and occupant.Parent then
+					table.insert(carOccupants, occupant.Parent)
+				end
+			end
+		end
+		local excludedRays = {}
+		for _, rayObject in ipairs(CollectionService:GetTagged("Ray")) do
+			table.insert(excludedRays, rayObject)
+		end
+		raycastParams.FilterDescendantsInstances = {car, workspace.Roads, carOccupants, excludedRays}
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 		local result = workspace:Raycast(offsetPosition, direction, raycastParams)
 
 		if carState.showRays then
@@ -215,14 +228,14 @@ function turnVehicle(direction)
 			changeBlinker("right")
 		end
 		accelerateVehicle(0.25)
-		steerVehicle(-0.5)
+		steerVehicle(-0.25)
 		wait(1)
 		steerVehicle(1)
-		wait(3.5)
+		wait(3)
 		changeBlinker(nil)
 	elseif direction == "straight" then
 		accelerateVehicle(0.5)
-		wait(2)
+		wait(3)
 		changeBlinker(nil)
 	end
 end
@@ -234,22 +247,25 @@ local function updateMotors()
 		local objectSteerAdjustment = 0
 		
 		if averageObjectOffset and averageObjectDistance then
+			objectAccelerationAdjustment = math.clamp(((averageObjectDistance-10)/30), 0.5, 1)
+			objectSteerAdjustment = 0.25
 			if averageObjectOffset < 35 then
-				objectSteerAdjustment = 0.5
-				objectAccelerationAdjustment = 0.5
+				objectSteerAdjustment = objectSteerAdjustment
 			elseif averageObjectOffset > 65 then
-				objectSteerAdjustment = -0.5
-				objectAccelerationAdjustment = 0.5
+				objectSteerAdjustment = -objectSteerAdjustment
 			else
 				accelerateVehicle(0)
 				return
 			end
 		end
-
 		local roadWidth = 36
 		local raycastParams = RaycastParams.new()
-		raycastParams.FilterDescendantsInstances = {car, workspace.Obstacles}
-		raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+		local excludedRays = {}
+		for _, rayObject in ipairs(CollectionService:GetTagged("Ray")) do
+			table.insert(excludedRays, rayObject)
+		end
+		raycastParams.FilterDescendantsInstances = {car, workspace.Obstacles, excludedRays}
+		raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 
 		local downRayOrigin = car.Detector.Position
 		local downRayDirection = Vector3.new(0, -50, 0)
@@ -258,39 +274,107 @@ local function updateMotors()
 			drawRay(downRayOrigin, downRay and downRay.Position or (downRayOrigin + downRayDirection), Color3.fromRGB(21, 140, 232), car)
 		end
 
-		local stopSignRayOrigin = car.Detector.CFrame * Vector3.new(0, 0, -15)
-		local stopSignRayDirection = Vector3.new(0, -50, 0)
-		local stopSignRay = workspace:Raycast(stopSignRayOrigin, stopSignRayDirection, raycastParams)
+		local intersectionRayOrigin = car.Detector.CFrame * Vector3.new(0, 0, -15)
+		local intersectionRayDirection = Vector3.new(0, -50, 0)
+		local intersectionRay = workspace:Raycast(intersectionRayOrigin, intersectionRayDirection, raycastParams)
 		if carState.showRays then
-			drawRay(stopSignRayOrigin, stopSignRay and stopSignRay.Position or (stopSignRayOrigin + stopSignRayDirection), Color3.fromRGB(255, 0, 0), car)
-		end
-		
-		local straightDetectionRayOrigin = car.Detector.CFrame * Vector3.new(0, 0, -75)
-		local straightDetectionRayDirection = Vector3.new(0, -50, 0)
-		local straightDetectionRay = workspace:Raycast(straightDetectionRayOrigin, straightDetectionRayDirection, raycastParams)
-		if carState.showRays then
-			drawRay(straightDetectionRayOrigin, straightDetectionRay and straightDetectionRay.Position or (straightDetectionRayOrigin + straightDetectionRayDirection), Color3.fromRGB(0, 255, 0), car)
-		end
-		local leftDetectionRayOrigin = car.Detector.CFrame * Vector3.new(-37.5, 0, -37.5)
-		local leftDetectionRayDirection = Vector3.new(0, -50, 0)
-		local leftDetectionRay = workspace:Raycast(leftDetectionRayOrigin, leftDetectionRayDirection, raycastParams)
-		if carState.showRays then
-			drawRay(leftDetectionRayOrigin, leftDetectionRay and leftDetectionRay.Position or (leftDetectionRayOrigin + leftDetectionRayDirection), Color3.fromRGB(255, 0, 0), car)
-		end
-		local rightDetectionRayOrigin = car.Detector.CFrame * Vector3.new(37.5, 0, -37.5)
-		local rightDetectionRayDirection = Vector3.new(0, -50, 0)
-		local rightDetectionRay = workspace:Raycast(rightDetectionRayOrigin, rightDetectionRayDirection, raycastParams)
-		if carState.showRays then
-			drawRay(rightDetectionRayOrigin, rightDetectionRay and rightDetectionRay.Position or (rightDetectionRayOrigin + rightDetectionRayDirection), Color3.fromRGB(0, 0, 255), car)
+			drawRay(intersectionRayOrigin, intersectionRay and intersectionRay.Position or (intersectionRayOrigin + intersectionRayDirection), Color3.fromRGB(255, 0, 0), car)
 		end
 
 		if downRay then
-			if stopSignRay and stopSignRay.Instance.Parent.Name == "Intersection Road" then
+			if intersectionRay and intersectionRay.Instance.Parent.Name == "Intersection Road" then
+				local intersection = intersectionRay.Instance.Parent.Road
+				local forwardDirection = car.Detector.CFrame.LookVector
+				local leftDirection = -car.Detector.CFrame.RightVector
+				local rightDirection = car.Detector.CFrame.RightVector
+				local carsAtIntersection = 0
+				
+				local rayOrigin = Vector3.new(intersection.Position.X + (forwardDirection.X * 37.5), car.Detector.Position.Y, intersection.Position.Z + (forwardDirection.Z * 37.5))
+				local rayDirection = Vector3.new(0, -50, 0)
+				local straightDetectionRay = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+				if carState.showRays then
+					drawRay(rayOrigin, straightDetectionRay and straightDetectionRay.Position or (rayOrigin + rayDirection), Color3.fromRGB(21, 140, 232), car)
+				end
+				
+				local rayOrigin = Vector3.new(intersection.Position.X + (leftDirection.X * 37.5), car.Detector.Position.Y, intersection.Position.Z + (leftDirection.Z * 37.5))
+				local rayDirection = Vector3.new(0, -50, 0)
+				local leftDetectionRay = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+				if carState.showRays then
+					drawRay(rayOrigin, leftDetectionRay and leftDetectionRay.Position or (rayOrigin + rayDirection), Color3.fromRGB(21, 140, 232), car)
+				end
+				
+				local rayOrigin = Vector3.new(intersection.Position.X + (rightDirection.X * 37.5), car.Detector.Position.Y, intersection.Position.Z + (rightDirection.Z * 37.5))
+				local rayDirection = Vector3.new(0, -50, 0)
+				local rightDetectionRay = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+				if carState.showRays then
+					drawRay(rayOrigin, rightDetectionRay and rightDetectionRay.Position or (rayOrigin + rayDirection), Color3.fromRGB(21, 140, 232), car)
+				end
+				
 				local straightAvailable = straightDetectionRay and straightDetectionRay.Instance.Parent.Name == "Straight Road"
 				local leftAvailable = leftDetectionRay and leftDetectionRay.Instance.Parent.Name == "Straight Road"
 				local rightAvailable = rightDetectionRay and rightDetectionRay.Instance.Parent.Name == "Straight Road"
+				
+				if straightAvailable then
+					local hitPosition = straightDetectionRay and straightDetectionRay.Position or rayOrigin
+					for i = 0, 360, 10 do
+						local angle = math.rad(i)
+						local rayDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
+						rayDirection = rayDirection * 18
+						local rayEndPosition = hitPosition + rayDirection
+						local rayResult = workspace:Raycast(hitPosition, rayDirection, raycastParams)
+						if rayResult then
+							if rayResult.Instance and rayResult.Instance.Name ~= "Ray" and rayResult.Instance.Parent.Name == "Car" and rayResult.Instance.Parent.DriverSeat.Throttle == 0 then
+								if carState.showRays then
+									carsAtIntersection = carsAtIntersection + 1
+									drawRay(hitPosition, rayResult.Position, Color3.fromRGB(255, 0, 0), car)
+									break
+								end
+							end
+						end
+					end
+				end
+				if leftAvailable then
+					local hitPosition = leftDetectionRay and leftDetectionRay.Position or rayOrigin
+					for i = 0, 360, 10 do
+						local angle = math.rad(i)
+						local rayDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
+						rayDirection = rayDirection * 18
+						local rayEndPosition = hitPosition + rayDirection
+						local rayResult = workspace:Raycast(hitPosition, rayDirection, raycastParams)
+						if rayResult then
+							if rayResult.Instance and rayResult.Instance.Name ~= "Ray" and rayResult.Instance.Parent.Name == "Car" and rayResult.Instance.Parent.DriverSeat.Throttle == 0 then
+								if carState.showRays then
+									carsAtIntersection = carsAtIntersection + 1
+									drawRay(hitPosition, rayResult.Position, Color3.fromRGB(255, 0, 0), car)
+									break
+								end
+							end
+						end
+					end
+				end
+				if rightAvailable then
+					local hitPosition = rightDetectionRay and rightDetectionRay.Position or rayOrigin
+					for i = 0, 360, 10 do
+						local angle = math.rad(i)
+						local rayDirection = Vector3.new(math.cos(angle), 0, math.sin(angle))
+						rayDirection = rayDirection * 18
+						local rayEndPosition = hitPosition + rayDirection
+						local rayResult = workspace:Raycast(hitPosition, rayDirection, raycastParams)
+						if rayResult then
+							if rayResult.Instance and rayResult.Instance.Name ~= "Ray" and rayResult.Instance.Parent.Name == "Car" and rayResult.Instance.Parent.DriverSeat.Throttle == 0 then
+								if carState.showRays then
+									carsAtIntersection = carsAtIntersection + 1
+									drawRay(hitPosition, rayResult.Position, Color3.fromRGB(255, 0, 0), car)
+									break
+								end
+							end
+						end
+					end
+				end
+												
 				accelerateVehicle(0)
 				steerVehicle(0)
+				wait(carsAtIntersection * 3)
 				if straightAvailable and not leftAvailable and not rightAvailable then
 					turnVehicle("straight")
 				elseif not straightAvailable and leftAvailable and not rightAvailable then
@@ -380,7 +464,7 @@ local function updateMotors()
 				if leftRay and rightRay then
 					local leftRayDistance = (leftRay.Position - car.Detector.Position).Magnitude
 					local rightRayDistance = (rightRay.Position - car.Detector.Position).Magnitude
-					local error = (leftRayDistance - (0.8 * roadWidth)) / roadWidth
+					local error = (leftRayDistance - (0.7 * roadWidth)) / roadWidth
 					integral = integral + error * 0.01
 					local derivative = (error - previousError) / 0.01
 					local steeringAdjustment = -(Kp * error + Ki * integral + Kd * derivative)
@@ -402,14 +486,14 @@ local function updateMotors()
 	end
 end
 
-driveSeat.Changed:Connect(function(property)
+car.DriverSeat.Changed:Connect(function(property)
 	if property == "ThrottleFloat" or property == "SteerFloat" then
 		if not carState.autopilotEnabled then
 			updateMotors()
 		end
 	end
 
-	if property == "Occupant" and not driveSeat.Occupant then
+	if property == "Occupant" and not car.DriverSeat.Occupant then
 		carState.autopilotEnabled = false
 		updateMotors()
 	end
@@ -432,7 +516,7 @@ event.OnServerEvent:Connect(function(player, vehicle, key)
 					changeLEDStrips(Color3.fromRGB(255, 0, 0))
 				end
 				for _, child in ipairs(car:GetChildren()) do
-					if child.Name == "RayVisualizer" then
+					if child.Name == "Ray" then
 						child:Destroy()
 					end
 				end
@@ -440,7 +524,7 @@ event.OnServerEvent:Connect(function(player, vehicle, key)
 			elseif key == "R" then
 				carState.showRays = not carState.showRays
 				for _, child in ipairs(car:GetChildren()) do
-					if child.Name == "RayVisualizer" then
+					if child.Name == "Ray" then
 						child:Destroy()
 					end
 				end
